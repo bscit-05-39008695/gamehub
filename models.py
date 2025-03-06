@@ -55,6 +55,17 @@ class GameSession(db.Model):
     
     spin_and_win = db.relationship('SpinAndWin', backref='session', lazy=True)
 
+
+class RoomSession(db.Model):
+    __tablename__ = 'room_sessions'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    room_id = db.Column(db.Integer, db.ForeignKey('rooms.id'), nullable=False)
+    status = db.Column(db.String(20), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 class SpinAndWin(db.Model):
     __tablename__ = 'spin_and_win'
     
@@ -66,27 +77,44 @@ class SpinAndWin(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class Multiplayer(db.Model):
-    __tablename__ = 'multiplayer'
-    
-    id = db.Column(db.Integer, primary_key=True)
-    session_id = db.Column(db.Integer, nullable=False)  # Creator's session
-    max_players = db.Column(db.Integer, nullable=False)
-    current_players = db.Column(db.Integer, nullable=False)
-    status = db.Column(db.String(20), nullable=False)  # waiting, ready, active, completed, abandoned
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    game_sessions = db.relationship('GameSession', backref='multiplayer_game', lazy=True)
-    russian_roulette = db.relationship('RussianRoulette', backref='multiplayer_game', lazy=True)
+        __tablename__ = 'multiplayer'
+
+        id = db.Column(db.Integer, primary_key=True)
+        session_id = db.Column(db.Integer, nullable=False)
+        game_id = db.Column(db.Integer, nullable=False)
+        max_players = db.Column(db.Integer, nullable=False)
+        current_players = db.Column(db.Integer, nullable=False)
+        status = db.Column(db.String(20), nullable=False)
+        created_at = db.Column(db.DateTime, default=datetime.utcnow)
+        updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+        game_sessions = db.relationship('GameSession', backref='multiplayer_game', lazy=True)
+        russian_roulette = db.relationship('RussianRoulette', backref='multiplayer_game', lazy=True)
+        
+        game = db.relationship(
+            'Game', 
+            foreign_keys=[game_id],
+            primaryjoin="Multiplayer.game_id == Game.id",
+            backref=db.backref('multiplayer_games', lazy=True)
+        )
 
 class RussianRoulette(db.Model):
     __tablename__ = 'russian_roulette'
     
     id = db.Column(db.Integer, primary_key=True)
     multiplayer_id = db.Column(db.Integer, db.ForeignKey('multiplayer.id'), nullable=False)
+    game_id = db.Column(db.Integer, db.ForeignKey('games.id'), nullable=False)
     bullet_position = db.Column(db.Integer, nullable=False)  # 1-6
     current_position = db.Column(db.Integer, nullable=False)  # Current chamber
     status = db.Column(db.String(20), nullable=False)  # active, completed
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class Room(db.Model):
+    __tablename__ = 'rooms'
+    id = db.Column(db.Integer, primary_key=True)
+    game_id = db.Column(db.Integer, db.ForeignKey('games.id'), nullable=False)
+    creator_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    status = db.Column(db.String(20), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

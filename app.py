@@ -1,4 +1,3 @@
-# app.py
 from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, jwt_required, create_access_token, get_jwt_identity
@@ -18,8 +17,6 @@ from extensions import db
 # Load environment variables from .env file
 load_dotenv()
 
-
-
 def create_app():
     app = Flask(__name__)
 
@@ -33,7 +30,7 @@ def create_app():
     db.init_app(app)
     
     # Import models here to avoid circular imports
-    from models import User, Transaction, GameSession, Game, SpinAndWin, RussianRoulette, Multiplayer, BetHistory
+    from models import User, Transaction, GameSession, Game, SpinAndWin, RussianRoulette, Multiplayer, BetHistory, Room, RoomSession
     
     migrate = Migrate(app, db)  # Add Flask-Migrate
     bcrypt = Bcrypt(app)  # Add Flask-Bcrypt
@@ -52,47 +49,96 @@ def create_app():
     @app.route('/register', methods=['POST'])
     def register():
         data = request.get_json()
-       
-        if not data or 'username' not in data or 'email' not in data or 'password' not in data:
-            return jsonify({"msg": "Missing required fields"}), 400
-       
-        if User.query.filter_by(username=data['username']).first() or User.query.filter_by(email=data['email']).first():
-            return jsonify({"msg": "Username or email already exists"}), 400
-       
+        
+        # Validate required fields
+        if not data or not data.get('email') or not data.get('password') or not data.get('username'):
+            return jsonify({'message': 'Missing required fields'}), 400
+        
+        # Check if password is empty
+        if not data['password'] or data['password'].strip() == '':
+            return jsonify({'message': 'Password must be non-empty'}), 400
+            
+        # Check if user already exists
+        existing_user = User.query.filter_by(email=data['email']).first()
+        if existing_user:
+            return jsonify({'message': 'User already exists with this email'}), 409
+    
+        # Create new user
         new_user = User(
             username=data['username'],
             email=data['email']
         )
-        # Use bcrypt to hash password
+        
+        # Hash the password
         new_user.password = bcrypt.generate_password_hash(data['password']).decode('utf-8')
-       
+        
+        # Save to database
         db.session.add(new_user)
         db.session.commit()
-       
-        access_token = create_access_token(identity=new_user.id)
-        return jsonify({"msg": "User created successfully", "access_token": access_token}), 201
+        
+        # Generate token
+        token = jwt.encode({
+            'user_id': new_user.id,
+            'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+        }, app.config['SECRET_KEY'], algorithm='HS256')
+        
+        return jsonify({'token': token}), 201
 
     @app.route('/login', methods=['POST'])
     def login():
         data = request.get_json()
         
-        if not data or 'username' not in data or 'password' not in data:
-            return jsonify({"msg": "Missing username or password"}), 400
-       
-        user = User.query.filter_by(username=data['username']).first()
-       
+        # Validate required fields
+        if not data or not data.get('email') or not data.get('password'):
+            return jsonify({'message': 'Email and password required'}), 400
+        
+        # Find user
+        user = User.query.filter_by(email=data['email']).first()
+        
+        # Check if user exists and password is correct
         if not user or not bcrypt.check_password_hash(user.password, data['password']):
-            return jsonify({"msg": "Invalid credentials"}), 401
-       
+            return jsonify({'message': 'Invalid email or password'}), 401
+        
+        # Generate token using Flask-JWT-Extended
         access_token = create_access_token(identity=user.id)
-        return jsonify({"access_token": access_token}), 200
+        
+        # Return token
+        return jsonify({
+            'token': access_token,
+            'username': user.username,
+            'balance': user.balance
+        }), 200
 
+    # Route to get user by ID
+    @app.route('/users', methods=['GET'])
+    @jwt_required()  # Ensure the request is authenticated
+    def get_all_users():
+        # Fetch all users from the database
+        users = User.query.all()
+
+        # If no users exist, return an empty list
+        if not users:
+            return jsonify([]), 200
+
+        # Return the list of users
+        user_list = []
+        for user in users:
+            user_list.append({
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "balance": user.balance,
+                "created_at": user.created_at.isoformat()
+            })
+
+        return jsonify(user_list), 200
     # User profile and balance routes
     @app.route('/profile', methods=['GET'])
     @jwt_required()
     def get_profile():
         user_id = get_jwt_identity()
-        user = User.query.get(user_id)
+        user = db.session.get(User, user_id)
+
         
         if not user:
             return jsonify({"msg": "User not found"}), 404
@@ -108,7 +154,7 @@ def create_app():
     @app.route('/deposit', methods=['POST'])
     @jwt_required()
     def deposit():
-        user_id = str(get_jwt_identity())  
+        user_id = get_jwt_identity()
         data = request.get_json()
     
         if not data or 'amount' not in data:
@@ -141,7 +187,7 @@ def create_app():
     
         return jsonify({"msg": "Deposit successful", "new_balance": user.balance}), 200
 
-    @app.route('/api/withdraw', methods=['POST'])
+    @app.route('/withdraw', methods=['POST'])
     @jwt_required()
     def withdraw():
         user_id = get_jwt_identity()
@@ -150,12 +196,12 @@ def create_app():
         if not data or 'amount' not in data:
             return jsonify({"msg": "Missing amount"}), 400
             
-        amount = data.get('amount', 0)
+        amount = int(data.get('amount', 0))
        
         if amount <= 0:
             return jsonify({"msg": "Invalid amount"}), 400
        
-        user = User.query.get(user_id)
+        user = db.session.get(User, user_id)
         
         if not user:
             return jsonify({"msg": "User not found"}), 404
@@ -178,7 +224,7 @@ def create_app():
         return jsonify({"msg": "Withdrawal successful", "new_balance": user.balance}), 200
 
     # Spin and Win game routes
-    @app.route('/api/games/spin-and-win/play', methods=['POST'])
+    @app.route('/games/spin-and-win/play', methods=['POST'])
     @jwt_required()
     def play_spin_and_win():
         user_id = get_jwt_identity()
@@ -266,7 +312,7 @@ def create_app():
         }), 200
 
     # SSE endpoints to replace SocketIO functionality
-    @app.route('/api/events/connect', methods=['GET'])
+    @app.route('/events/connect', methods=['GET'])
     @jwt_required()
     def connect_to_events():
         user_id = get_jwt_identity()
@@ -307,127 +353,71 @@ def create_app():
                 game_events[user_id].put(event_data)
 
     # Russian Roulette (Multiplayer) game routes
-    @app.route('/api/games/join', methods=['POST'])
+    @app.route('/rooms/create', methods=['POST'])
     @jwt_required()
-    def join_game():
+    def create_room():
         user_id = get_jwt_identity()
         data = request.get_json()
-        
+
         if not data or 'game_id' not in data:
             return jsonify({"msg": "Missing game ID"}), 400
-            
+
         game_id = data.get('game_id')
-        
+
         # Check if game exists
         game = Game.query.get(game_id)
         if not game:
             return jsonify({"msg": "Game not found"}), 404
-        
-        # Get open multiplayer game or create new one
-        multiplayer = Multiplayer.query.filter_by(
-            game_id=game_id,
-            status='waiting'
-        ).first()
-        
-        if not multiplayer:
-            # Create new multiplayer game
-            game_session = GameSession(
-                user_id=user_id,
-                game_id=game_id,
-                status='waiting'
-            )
-            db.session.add(game_session)
-            db.session.flush()
-            
-            multiplayer = Multiplayer(
-                session_id=game_session.id,
-                max_players=6,  # For Russian Roulette
-                current_players=1,
-                status='waiting'
-            )
-            db.session.add(multiplayer)
-            db.session.commit()
-            
-            # Notify about new game
-            event_data = {
-                'type': 'game_status',
-                'game_id': multiplayer.id,
-                'status': 'waiting',
-                'players': 1,
-                'max_players': multiplayer.max_players
-            }
-        else:
-            # Join existing multiplayer game
-            multiplayer.current_players += 1
-            
-            if multiplayer.current_players >= multiplayer.max_players:
-                multiplayer.status = 'ready'
-                
-            db.session.commit()
-            
-            # Notify about updated game status
-            event_data = {
-                'type': 'game_status',
-                'game_id': multiplayer.id,
-                'status': multiplayer.status,
-                'players': multiplayer.current_players,
-                'max_players': multiplayer.max_players
-            }
-            
-            # Start game if ready
-            if multiplayer.status == 'ready':
-                start_russian_roulette(multiplayer.id, game_id)
-        
-        # Add user to game tracking
-        game_session = GameSession(
-            user_id=user_id,
-            game_id=game_id,
-            multiplayer_id=multiplayer.id,
-            status='active'
-        )
-        db.session.add(game_session)
-        db.session.commit()
-        
-        # Broadcast event
-        broadcast_to_game(game_id, event_data)
-        
-        return jsonify({
-            'game_id': multiplayer.id,
-            'status': multiplayer.status,
-            'players': multiplayer.current_players,
-            'max_players': multiplayer.max_players
-        }), 200
 
-    def start_russian_roulette(multiplayer_id, game_id):
-        # Get the multiplayer game
-        multiplayer = Multiplayer.query.get(multiplayer_id)
-        
-        # Mark game as started
-        multiplayer.status = 'active'
+        # Create new room
+        room = Room(
+            game_id=game_id,
+            creator_id=user_id,
+            status='waiting'
+        )
+        db.session.add(room)
         db.session.commit()
-        
-        # Initialize the Russian Roulette game
-        bullet_position = random.randint(1, 6)  # Random position for the bullet
-        current_position = 1
-        
-        roulette = RussianRoulette(
-            multiplayer_id=multiplayer_id,
-            bullet_position=bullet_position,
-            current_position=current_position,
+
+        # Create new multiplayer game for the room
+        room_id = room.id
+        room = Room.query.get(room_id)
+
+        multiplayer = Multiplayer(
+            session_id=room_id,
+            game_id=game.id,
+            max_players=6,  # For Russian Roulette
+            current_players=1,
+            status='waiting'
+        )
+        db.session.add(multiplayer)
+        db.session.commit()
+
+        # Add user to room tracking
+        room_session = RoomSession(
+            user_id=user_id,
+            room_id=room.id,
             status='active'
         )
-        db.session.add(roulette)
+        db.session.add(room_session)
         db.session.commit()
-        
-        # Notify all players that game has started
+
+        # Notify about new room
         event_data = {
-            'type': 'game_started',
-            'game_id': multiplayer_id,
-            'roulette_id': roulette.id
+            'type': 'room_created',
+            'room_id': room.id,
+            'status': 'waiting',
+            'players': 1,
+            'max_players': multiplayer.max_players
         }
         broadcast_to_game(game_id, event_data)
 
-    @app.route('/api/games/place-bet', methods=['POST'])
+        return jsonify({
+            'room_id': room.id,
+            'status': 'waiting',
+            'players': 1,
+            'max_players': multiplayer.max_players
+        }), 200
+    @app.route('/games/place-bet', methods=['POST'])
     @jwt_required()
     def place_bet():
         user_id = get_jwt_identity()
@@ -504,7 +494,7 @@ def create_app():
         
         return jsonify(response), 200
 
-    @app.route('/api/games/pull-trigger', methods=['POST'])
+    @app.route('/games/pull-trigger', methods=['POST'])
     @jwt_required()
     def pull_trigger():
         user_id = get_jwt_identity()
@@ -602,7 +592,7 @@ def create_app():
         
         return jsonify(event_data), 200
 
-    @app.route('/api/games/leave', methods=['POST'])
+    @app.route('/games/leave', methods=['POST'])
     @jwt_required()
     def leave_game():
         user_id = get_jwt_identity()
@@ -647,29 +637,28 @@ def create_app():
             return jsonify({'status': 'error', 'message': 'No active game session found'}), 404
 
     # Game stats and history routes
-    @app.route('/api/history', methods=['GET'])
+    @app.route('/history', methods=['GET'])
     @jwt_required()
     def get_history():
         user_id = get_jwt_identity()
-        
+
         bets = BetHistory.query.filter_by(user_id=user_id).order_by(BetHistory.created_at.desc()).limit(50).all()
-        
+
         history = []
         for bet in bets:
             game = Game.query.get(bet.game_id)
             if game:
                 history.append({
                     'id': bet.id,
-                    'game': game.name,
-                    'bet_amount': bet.bet_amount,
-                    'win_amount': bet.win_amount,
-                    'net_result': bet.net_result,
+                    'gameType': game.name,
+                    'amount': bet.bet_amount,
+                    'result': bet.net_result,
+                    'winAmount': bet.win_amount,
                     'created_at': bet.created_at.isoformat()
                 })
-        
-        return jsonify(history), 200
 
-    @app.route('/api/stats', methods=['GET'])
+        return jsonify({'gameHistory': history}), 200
+    @app.route('/stats', methods=['GET'])
     @jwt_required()
     def get_stats():
         user_id = get_jwt_identity()
@@ -735,4 +724,4 @@ def create_app():
 app = create_app()
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5001, debug=True)
